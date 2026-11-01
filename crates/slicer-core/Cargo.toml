@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rayon = "1.10"
+stl_io = "0.7"
+svg = "0.18"
