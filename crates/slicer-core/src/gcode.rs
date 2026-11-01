@@ -1,4 +1,4 @@
-use std::{fmt, fs, path::Path};
+use std::{collections::HashMap, fmt, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -171,7 +171,7 @@ pub fn generate_gcode_with_report(
     output.push_str(&expand_start_gcode(&config.start_gcode, config, true));
     output.push('\n');
     let mut position = None;
-    let mut previous_seams = Vec::new();
+    let mut previous_seams = HashMap::new();
     let mut report = GCodeReport {
         gcode: String::new(),
         total_travel_distance: 0.0,
@@ -218,17 +218,15 @@ pub fn generate_gcode_with_report(
             solid_layer,
             sparse_layer,
             position,
-            previous_seams.last().copied(),
+            &previous_seams,
             config,
             offset_x,
             offset_y,
         );
-        if let Some(seam) = paths
-            .iter()
-            .find(|path| path.closed)
-            .map(|path| path.points[0])
-        {
-            previous_seams.push(seam);
+        for path in &paths {
+            if let (Some(wall_index), Some(&seam)) = (path.wall_index, path.points.first()) {
+                previous_seams.entry(wall_index).or_insert(seam);
+            }
         }
         let walls = perimeter
             .walls
@@ -271,6 +269,7 @@ pub fn write_gcode(
 struct PlannedPath {
     points: Vec<Point2>,
     closed: bool,
+    wall_index: Option<usize>,
     role: &'static str,
     speed: f64,
 }
@@ -281,7 +280,7 @@ fn plan_layer(
     solid: &SolidInfillLayer,
     sparse: &InfillLayer,
     current: Option<(f64, f64)>,
-    previous_seam: Option<Point2>,
+    previous_seams: &HashMap<usize, Point2>,
     config: &GCodeConfig,
     offset_x: f64,
     offset_y: f64,
@@ -290,8 +289,14 @@ fn plan_layer(
     let mut inner_paths = Vec::new();
     for wall in perimeter.walls.iter().filter(|wall| wall.wall_index > 0) {
         inner_paths.push(PlannedPath {
-            points: seam_points(&wall.polygon.points, current_local, previous_seam, config),
+            points: seam_points(
+                &wall.polygon.points,
+                current_local,
+                previous_seams.get(&wall.wall_index).copied(),
+                config,
+            ),
             closed: true,
+            wall_index: Some(wall.wall_index),
             role: "Inner wall",
             speed: config.inner_wall_speed,
         });
@@ -300,8 +305,14 @@ fn plan_layer(
     let mut outer_paths = Vec::new();
     for wall in perimeter.walls.iter().filter(|wall| wall.wall_index == 0) {
         outer_paths.push(PlannedPath {
-            points: seam_points(&wall.polygon.points, current_local, previous_seam, config),
+            points: seam_points(
+                &wall.polygon.points,
+                current_local,
+                previous_seams.get(&wall.wall_index).copied(),
+                config,
+            ),
             closed: true,
+            wall_index: Some(wall.wall_index),
             role: "Outer wall",
             speed: config.outer_wall_speed,
         });
@@ -421,6 +432,7 @@ fn order_lines(
         .map(|line| PlannedPath {
             points: vec![line.start, line.end],
             closed: false,
+            wall_index: None,
             role,
             speed,
         })
@@ -959,5 +971,48 @@ mod tests {
         let first = seam_points(&points, None, None, &config);
         let second = seam_points(&points, None, Some(first[0]), &config);
         assert_eq!(first[0], second[0]);
+    }
+
+    #[test]
+    fn aligned_seams_are_tracked_per_wall_index() {
+        let config = GCodeConfig {
+            seam_position: SeamPosition::Aligned,
+            ..Default::default()
+        };
+        let outer = vec![
+            Point2 { x: 0, y: 0 },
+            Point2 { x: 10_000, y: 0 },
+            Point2 {
+                x: 10_000,
+                y: 10_000,
+            },
+            Point2 { x: 0, y: 10_000 },
+        ];
+        let inner = vec![
+            Point2 { x: 2_000, y: 2_000 },
+            Point2 { x: 8_000, y: 2_000 },
+            Point2 { x: 8_000, y: 8_000 },
+            Point2 { x: 2_000, y: 8_000 },
+        ];
+        let previous = HashMap::from([
+            (
+                0,
+                Point2 {
+                    x: 10_000,
+                    y: 10_000,
+                },
+            ),
+            (1, Point2 { x: 2_000, y: 8_000 }),
+        ]);
+        let outer_seam = seam_points(&outer, None, previous.get(&0).copied(), &config)[0];
+        let inner_seam = seam_points(&inner, None, previous.get(&1).copied(), &config)[0];
+        assert_eq!(
+            outer_seam,
+            Point2 {
+                x: 10_000,
+                y: 10_000
+            }
+        );
+        assert_eq!(inner_seam, Point2 { x: 2_000, y: 8_000 });
     }
 }
