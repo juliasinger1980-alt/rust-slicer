@@ -27,6 +27,10 @@ pub struct GCodeConfig {
     pub first_layer_travel_speed: f64,
     pub retraction_distance: f64,
     pub retraction_speed: f64,
+    pub minimum_retraction_travel: f64,
+    pub seam_position: SeamPosition,
+    pub travel_optimization: bool,
+    pub avoid_crossing_perimeters: bool,
     pub fan_speed: u8,
     pub first_layer_fan_speed: u8,
     pub maximum_speed: f64,
@@ -58,6 +62,10 @@ impl Default for GCodeConfig {
             first_layer_travel_speed: 80.0,
             retraction_distance: 0.8,
             retraction_speed: 35.0,
+            minimum_retraction_travel: 1.0,
+            seam_position: SeamPosition::Nearest,
+            travel_optimization: true,
+            avoid_crossing_perimeters: true,
             fan_speed: 128,
             first_layer_fan_speed: 0,
             maximum_speed: 300.0,
@@ -93,6 +101,8 @@ impl GCodeConfig {
             .any(|value| !value.is_finite() || *value <= 0.0)
             || !self.retraction_distance.is_finite()
             || self.retraction_distance < 0.0
+            || !self.minimum_retraction_travel.is_finite()
+            || self.minimum_retraction_travel < 0.0
             || self.maximum_temperature == 0
         {
             return Err(GCodeError::InvalidConfiguration);
@@ -125,6 +135,29 @@ pub fn generate_gcode(
     sparse: &[InfillLayer],
     config: &GCodeConfig,
 ) -> Result<String, GCodeError> {
+    Ok(generate_gcode_with_report(perimeters, solid, sparse, config)?.gcode)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SeamPosition {
+    Nearest,
+    Aligned,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GCodeReport {
+    pub gcode: String,
+    pub total_travel_distance: f64,
+    pub estimated_print_time_seconds: f64,
+}
+
+pub fn generate_gcode_with_report(
+    perimeters: &[PerimeterLayer],
+    solid: &[SolidInfillLayer],
+    sparse: &[InfillLayer],
+    config: &GCodeConfig,
+) -> Result<GCodeReport, GCodeError> {
     config.validate()?;
     if perimeters.len() != solid.len() || perimeters.len() != sparse.len() {
         return Err(GCodeError::LayerCountMismatch);
@@ -136,6 +169,12 @@ pub fn generate_gcode(
     output.push_str(&expand_start_gcode(&config.start_gcode, config, true));
     output.push('\n');
     let mut position = None;
+    let mut previous_seams = Vec::new();
+    let mut report = GCodeReport {
+        gcode: String::new(),
+        total_travel_distance: 0.0,
+        estimated_print_time_seconds: 0.0,
+    };
     for (index, ((perimeter, solid_layer), sparse_layer)) in
         perimeters.iter().zip(solid).zip(sparse).enumerate()
     {
@@ -172,82 +211,47 @@ pub fn generate_gcode(
                 config.fan_speed
             }
         ));
-        let paths = [
-            (
-                "Inner wall",
-                config.inner_wall_speed,
-                perimeter
-                    .walls
-                    .iter()
-                    .filter(|wall| wall.wall_index > 0)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|wall| wall.polygon.points.clone())
-                    .collect::<Vec<_>>(),
-            ),
-            (
-                "Outer wall",
-                config.outer_wall_speed,
-                perimeter
-                    .walls
-                    .iter()
-                    .filter(|wall| wall.wall_index == 0)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|wall| wall.polygon.points.clone())
-                    .collect::<Vec<_>>(),
-            ),
-        ];
-        for (role, speed, loops) in paths {
-            for points in loops {
-                emit_polyline(
-                    &mut output,
-                    &mut position,
-                    &points,
-                    z,
-                    role,
-                    speed,
-                    config,
-                    offset_x,
-                    offset_y,
-                    first,
-                )?;
-            }
+        let paths = plan_layer(
+            perimeter,
+            solid_layer,
+            sparse_layer,
+            position,
+            previous_seams.last().copied(),
+            config,
+            offset_x,
+            offset_y,
+        );
+        if let Some(seam) = paths
+            .iter()
+            .find(|path| path.closed)
+            .map(|path| path.points[0])
+        {
+            previous_seams.push(seam);
         }
-        for line in &solid_layer.solid_lines {
-            emit_line(
+        let walls = perimeter
+            .walls
+            .iter()
+            .map(|wall| wall.polygon.points.as_slice())
+            .collect::<Vec<_>>();
+        for path in paths {
+            emit_path(
                 &mut output,
                 &mut position,
-                line.start,
-                line.end,
+                &path,
                 z,
-                "Solid infill",
-                config.solid_infill_speed,
+                &walls,
                 config,
                 offset_x,
                 offset_y,
                 first,
-            )?;
-        }
-        for line in &sparse_layer.lines {
-            emit_line(
-                &mut output,
-                &mut position,
-                line.start,
-                line.end,
-                z,
-                "Sparse infill",
-                config.sparse_infill_speed,
-                config,
-                offset_x,
-                offset_y,
-                first,
+                &mut report,
             )?;
         }
     }
     output.push_str(&config.end_gcode);
     output.push('\n');
-    Ok(output)
+    report.gcode = output;
+    Ok(report)
 }
 
 pub fn write_gcode(
@@ -261,61 +265,224 @@ pub fn write_gcode(
     fs::write(path, output).map_err(GCodeError::Io)
 }
 
+#[derive(Clone, Debug)]
+struct PlannedPath {
+    points: Vec<Point2>,
+    closed: bool,
+    role: &'static str,
+    speed: f64,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn emit_polyline(
+fn plan_layer(
+    perimeter: &PerimeterLayer,
+    solid: &SolidInfillLayer,
+    sparse: &InfillLayer,
+    current: Option<(f64, f64)>,
+    previous_seam: Option<Point2>,
+    config: &GCodeConfig,
+    offset_x: f64,
+    offset_y: f64,
+) -> Vec<PlannedPath> {
+    let current_local = current.map(|(x, y)| (x - offset_x, y - offset_y));
+    let mut inner_paths = Vec::new();
+    for wall in perimeter.walls.iter().filter(|wall| wall.wall_index > 0) {
+        inner_paths.push(PlannedPath {
+            points: seam_points(&wall.polygon.points, current_local, previous_seam, config),
+            closed: true,
+            role: "Inner wall",
+            speed: config.inner_wall_speed,
+        });
+    }
+    let mut paths = order_paths(inner_paths, current_local, config.travel_optimization);
+    let mut outer_paths = Vec::new();
+    for wall in perimeter.walls.iter().filter(|wall| wall.wall_index == 0) {
+        outer_paths.push(PlannedPath {
+            points: seam_points(&wall.polygon.points, current_local, previous_seam, config),
+            closed: true,
+            role: "Outer wall",
+            speed: config.outer_wall_speed,
+        });
+    }
+    paths.extend(order_paths(
+        outer_paths,
+        current_local,
+        config.travel_optimization,
+    ));
+    paths.extend(order_lines(
+        &solid.solid_lines,
+        "Solid infill",
+        config.solid_infill_speed,
+        current_local,
+        config.travel_optimization,
+    ));
+    paths.extend(order_lines(
+        &sparse.lines,
+        "Sparse infill",
+        config.sparse_infill_speed,
+        current_local,
+        config.travel_optimization,
+    ));
+    paths
+}
+
+fn order_paths(
+    mut remaining: Vec<PlannedPath>,
+    current: Option<(f64, f64)>,
+    optimize: bool,
+) -> Vec<PlannedPath> {
+    if !optimize {
+        return remaining;
+    }
+    let mut ordered = Vec::with_capacity(remaining.len());
+    let mut at = current;
+    while !remaining.is_empty() {
+        let index = remaining
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let a_distance = at.map_or(0.0, |at| point_distance_sq(a.points[0], at));
+                let b_distance = at.map_or(0.0, |at| point_distance_sq(b.points[0], at));
+                a_distance.total_cmp(&b_distance)
+            })
+            .map_or(0, |(index, _)| index);
+        let path = remaining.swap_remove(index);
+        at = Some(point_mm(path.points[0]));
+        ordered.push(path);
+    }
+    ordered
+}
+
+fn seam_points(
+    points: &[Point2],
+    current: Option<(f64, f64)>,
+    previous_seam: Option<Point2>,
+    config: &GCodeConfig,
+) -> Vec<Point2> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let target = match config.seam_position {
+        SeamPosition::Nearest => current,
+        SeamPosition::Aligned => previous_seam
+            .map(|point| {
+                (
+                    point.x as f64 / DEFAULT_SCALE,
+                    point.y as f64 / DEFAULT_SCALE,
+                )
+            })
+            .or(current),
+    };
+    let index = target.map_or(0, |target| {
+        points
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                point_distance_sq(**a, target).total_cmp(&point_distance_sq(**b, target))
+            })
+            .map_or(0, |(index, _)| index)
+    });
+    points
+        .iter()
+        .copied()
+        .cycle()
+        .skip(index)
+        .take(points.len())
+        .collect()
+}
+
+fn order_lines(
+    lines: &[crate::InfillLine],
+    role: &'static str,
+    speed: f64,
+    current: Option<(f64, f64)>,
+    optimize: bool,
+) -> Vec<PlannedPath> {
+    let mut remaining = lines
+        .iter()
+        .map(|line| PlannedPath {
+            points: vec![line.start, line.end],
+            closed: false,
+            role,
+            speed,
+        })
+        .collect::<Vec<_>>();
+    if !optimize {
+        return remaining;
+    }
+    let mut ordered = Vec::with_capacity(remaining.len());
+    let mut at = current;
+    while !remaining.is_empty() {
+        let (index, reverse, _) = remaining
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let start_distance = at.map_or(0.0, |at| point_distance_sq(path.points[0], at));
+                let end_distance = at.map_or(0.0, |at| point_distance_sq(path.points[1], at));
+                (
+                    index,
+                    end_distance < start_distance,
+                    start_distance.min(end_distance),
+                )
+            })
+            .min_by(|(_, _, a), (_, _, b)| a.total_cmp(b))
+            .unwrap();
+        let mut path = remaining.swap_remove(index);
+        if reverse {
+            path.points.reverse();
+        }
+        at = Some(point_mm(path.points[1]));
+        ordered.push(path);
+    }
+    ordered
+}
+
+fn point_mm(point: Point2) -> (f64, f64) {
+    (
+        point.x as f64 / DEFAULT_SCALE,
+        point.y as f64 / DEFAULT_SCALE,
+    )
+}
+
+fn point_distance_sq(point: Point2, target: (f64, f64)) -> f64 {
+    let (x, y) = point_mm(point);
+    (x - target.0).powi(2) + (y - target.1).powi(2)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_path(
     output: &mut String,
     position: &mut Option<(f64, f64)>,
-    points: &[Point2],
+    path: &PlannedPath,
     z: f64,
-    role: &str,
-    speed: f64,
+    walls: &[&[Point2]],
     config: &GCodeConfig,
     offset_x: f64,
     offset_y: f64,
     first: bool,
+    report: &mut GCodeReport,
 ) -> Result<(), GCodeError> {
-    if points.len() < 3 {
+    if path.points.len() < if path.closed { 3 } else { 2 } {
         return Ok(());
     }
-    let path = points
+    let start = path.points[0];
+    emit_travel(
+        output, position, start, z, walls, config, offset_x, offset_y, first, report,
+    )?;
+    let points = path
+        .points
         .iter()
         .copied()
         .skip(1)
-        .chain(std::iter::once(points[0]));
-    let start = points[0];
-    emit_travel(
-        output, position, start, z, role, config, offset_x, offset_y, first,
-    )?;
+        .chain(path.closed.then_some(path.points[0]));
     let mut previous = start;
-    for point in path {
+    for point in points {
         emit_extrusion(
-            output, position, previous, point, z, role, speed, config, offset_x, offset_y, first,
+            output, position, previous, point, z, path, config, offset_x, offset_y, first, report,
         )?;
         previous = point;
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_line(
-    output: &mut String,
-    position: &mut Option<(f64, f64)>,
-    start: Point2,
-    end: Point2,
-    z: f64,
-    role: &str,
-    speed: f64,
-    config: &GCodeConfig,
-    offset_x: f64,
-    offset_y: f64,
-    first: bool,
-) -> Result<(), GCodeError> {
-    emit_travel(
-        output, position, start, z, role, config, offset_x, offset_y, first,
-    )?;
-    emit_extrusion(
-        output, position, start, end, z, role, speed, config, offset_x, offset_y, first,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -324,34 +491,45 @@ fn emit_travel(
     position: &mut Option<(f64, f64)>,
     point: Point2,
     z: f64,
-    role: &str,
+    walls: &[&[Point2]],
     config: &GCodeConfig,
     offset_x: f64,
     offset_y: f64,
     first: bool,
+    report: &mut GCodeReport,
 ) -> Result<(), GCodeError> {
     let (x, y) = translate(point, offset_x, offset_y);
     check_coordinate(x, y, z, config)?;
     if position.is_some_and(|current| current != (x, y)) {
-        if config.retraction_distance > 0.0 {
+        let current = position.unwrap();
+        let route = travel_route(current, (x, y), walls, config.avoid_crossing_perimeters)?;
+        let route_distance = route
+            .windows(2)
+            .map(|pair| (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1))
+            .sum::<f64>();
+        report.total_travel_distance += route_distance;
+        report.estimated_print_time_seconds += route_distance / config.travel_speed / 60.0;
+        if route_distance > config.minimum_retraction_travel && config.retraction_distance > 0.0 {
             output.push_str(&format!(
                 "G1 E-{:.5} F{}\n",
                 config.retraction_distance,
                 feedrate(config.retraction_speed, config)
             ));
         }
-        output.push_str(&format!(
-            "G0 X{x:.3} Y{y:.3} Z{z:.3} F{}\n",
-            feedrate(
-                if first {
-                    config.first_layer_travel_speed
-                } else {
-                    config.travel_speed
-                },
-                config
-            )
-        ));
-        if config.retraction_distance > 0.0 {
+        for (route_x, route_y) in route.into_iter().skip(1) {
+            output.push_str(&format!(
+                "G0 X{route_x:.3} Y{route_y:.3} Z{z:.3} F{}\n",
+                feedrate(
+                    if first {
+                        config.first_layer_travel_speed
+                    } else {
+                        config.travel_speed
+                    },
+                    config
+                )
+            ));
+        }
+        if route_distance > config.minimum_retraction_travel && config.retraction_distance > 0.0 {
             output.push_str(&format!(
                 "G1 E{:.5} F{}\n",
                 config.retraction_distance,
@@ -360,7 +538,8 @@ fn emit_travel(
         }
     } else if position.is_none() {
         output.push_str(&format!(
-            ";TYPE:{role}\nG0 X{x:.3} Y{y:.3} Z{z:.3} F{}\n",
+            ";TYPE:{}\nG0 X{x:.3} Y{y:.3} Z{z:.3} F{}\n",
+            "travel",
             feedrate(
                 if first {
                     config.first_layer_travel_speed
@@ -382,12 +561,12 @@ fn emit_extrusion(
     previous: Point2,
     point: Point2,
     z: f64,
-    role: &str,
-    speed: f64,
+    path: &PlannedPath,
     config: &GCodeConfig,
     offset_x: f64,
     offset_y: f64,
     first: bool,
+    report: &mut GCodeReport,
 ) -> Result<(), GCodeError> {
     let (x, y) = translate(point, offset_x, offset_y);
     check_coordinate(x, y, z, config)?;
@@ -406,19 +585,69 @@ fn emit_extrusion(
         },
         config.filament_diameter,
     );
+    let speed = if first {
+        config.first_layer_speed
+    } else {
+        path.speed
+    };
     output.push_str(&format!(
-        ";TYPE:{role}\nG1 X{x:.3} Y{y:.3} Z{z:.3} E{e:.5} F{}\n",
-        feedrate(
-            if first {
-                config.first_layer_speed
-            } else {
-                speed
-            },
-            config
-        )
+        ";TYPE:{}\nG1 X{x:.3} Y{y:.3} Z{z:.3} E{e:.5} F{}\n",
+        path.role,
+        feedrate(speed, config)
     ));
+    report.estimated_print_time_seconds += length / speed / 60.0;
     *position = Some((x, y));
     Ok(())
+}
+
+fn travel_route(
+    start: (f64, f64),
+    end: (f64, f64),
+    walls: &[&[Point2]],
+    avoid_crossing: bool,
+) -> Result<Vec<(f64, f64)>, GCodeError> {
+    if !avoid_crossing || !travel_crosses_walls(start, end, walls) {
+        return Ok(vec![start, end]);
+    }
+    let mut candidates = Vec::new();
+    for wall in walls {
+        for point in *wall {
+            let candidate = point_mm(*point);
+            if !travel_crosses_walls(start, candidate, walls)
+                && !travel_crosses_walls(candidate, end, walls)
+            {
+                let distance = (candidate.0 - start.0).hypot(candidate.1 - start.1)
+                    + (end.0 - candidate.0).hypot(end.1 - candidate.1);
+                candidates.push((distance, candidate));
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, candidate)| vec![start, candidate, end])
+        .ok_or(GCodeError::NoSafeTravelRoute)
+}
+
+fn travel_crosses_walls(start: (f64, f64), end: (f64, f64), walls: &[&[Point2]]) -> bool {
+    walls.iter().any(|wall| {
+        wall.iter()
+            .copied()
+            .zip(wall.iter().copied().cycle().skip(1))
+            .take(wall.len())
+            .any(|(a, b)| segments_intersect(start, end, point_mm(a), point_mm(b)))
+    })
+}
+
+fn segments_intersect(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
+    fn orientation(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
+        (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+    }
+    let ab_c = orientation(a, b, c);
+    let ab_d = orientation(a, b, d);
+    let cd_a = orientation(c, d, a);
+    let cd_b = orientation(c, d, b);
+    ab_c * ab_d <= 1e-9 && cd_a * cd_b <= 1e-9
 }
 
 fn feedrate(speed: f64, config: &GCodeConfig) -> u64 {
@@ -517,6 +746,7 @@ pub enum GCodeError {
     LayerCountMismatch,
     EmptyGeometry,
     CoordinateOutsideBed { x: f64, y: f64, z: f64 },
+    NoSafeTravelRoute,
 }
 
 impl fmt::Display for GCodeError {
@@ -533,6 +763,9 @@ impl fmt::Display for GCodeError {
                 formatter,
                 "coordinate ({x:.3}, {y:.3}, {z:.3}) is outside the bed volume"
             ),
+            Self::NoSafeTravelRoute => {
+                write!(formatter, "no safe perimeter-avoiding travel route exists")
+            }
         }
     }
 }
@@ -663,5 +896,50 @@ mod tests {
             generate_gcode(&perimeters, &solid, &sparse, &config),
             Err(GCodeError::CoordinateOutsideBed { .. })
         ));
+    }
+
+    #[test]
+    fn optimization_preserves_extrusion_and_does_not_increase_travel() {
+        let (perimeters, solid, sparse) = sample_inputs();
+        let optimized =
+            generate_gcode_with_report(&perimeters, &solid, &sparse, &GCodeConfig::default())
+                .unwrap();
+        let unoptimized_config = GCodeConfig {
+            travel_optimization: false,
+            ..Default::default()
+        };
+        let unoptimized =
+            generate_gcode_with_report(&perimeters, &solid, &sparse, &unoptimized_config).unwrap();
+        assert!(optimized.total_travel_distance <= unoptimized.total_travel_distance + 1e-9);
+        let extrusion = |gcode: &str| {
+            gcode
+                .lines()
+                .filter_map(|line| line.split(" E").nth(1))
+                .filter_map(|value| value.split_whitespace().next())
+                .filter_map(|value| value.parse::<f64>().ok())
+                .filter(|value| *value > 0.0)
+                .sum::<f64>()
+        };
+        assert!((extrusion(&optimized.gcode) - extrusion(&unoptimized.gcode)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aligned_seam_reuses_the_previous_layer_target() {
+        let points = vec![
+            Point2 { x: 0, y: 0 },
+            Point2 { x: 10_000, y: 0 },
+            Point2 {
+                x: 10_000,
+                y: 10_000,
+            },
+            Point2 { x: 0, y: 10_000 },
+        ];
+        let config = GCodeConfig {
+            seam_position: SeamPosition::Aligned,
+            ..Default::default()
+        };
+        let first = seam_points(&points, None, None, &config);
+        let second = seam_points(&points, None, Some(first[0]), &config);
+        assert_eq!(first[0], second[0]);
     }
 }

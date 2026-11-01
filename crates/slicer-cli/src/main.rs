@@ -2,7 +2,7 @@ use std::{env, fs, path::PathBuf};
 
 use slicer_core::{
     GCodeConfig, InfillConfig, Mesh, PerimeterConfig, SliceConfig, SolidInfillConfig,
-    generate_gcode, generate_infill, generate_perimeters, generate_solid_infills,
+    generate_gcode_with_report, generate_infill, generate_perimeters, generate_solid_infills,
     load_gcode_config, slice_mesh, write_infill_layer_svg, write_layer_svg,
     write_perimeter_layer_svg, write_solid_infill_layer_svg,
 };
@@ -79,10 +79,13 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn std::e
             Some(path) => load_gcode_config(path)?,
             None => GCodeConfig::default(),
         };
-        fs::write(
-            output,
-            generate_gcode(&perimeters, &solid_infill, &infill, &config)?,
-        )?;
+        let report = generate_gcode_with_report(&perimeters, &solid_infill, &infill, &config)?;
+        fs::write(output, report.gcode)?;
+        println!("travel distance: {:.2} mm", report.total_travel_distance);
+        println!(
+            "estimated print time: {:.1} s",
+            report.estimated_print_time_seconds
+        );
     } else if !had_svg_output {
         return Err("provide --gcode-out or --svg-out".into());
     }
