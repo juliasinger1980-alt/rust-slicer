@@ -6,6 +6,7 @@ use std::{
     path::Path,
 };
 
+use clipper2::{EndType, JoinType, One, Path as ClipperPath, inflate};
 use rayon::prelude::*;
 
 pub const DEFAULT_SCALE: f64 = 1_000.0;
@@ -130,6 +131,49 @@ pub struct Layer {
     pub contours: Vec<Polygon>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PerimeterConfig {
+    pub wall_count: usize,
+    pub line_width: f64,
+    pub nozzle_diameter: f64,
+}
+
+impl Default for PerimeterConfig {
+    fn default() -> Self {
+        Self {
+            wall_count: 3,
+            line_width: 0.4,
+            nozzle_diameter: 0.4,
+        }
+    }
+}
+
+impl PerimeterConfig {
+    fn validate(self) -> Result<Self, SliceError> {
+        if !self.line_width.is_finite()
+            || !self.nozzle_diameter.is_finite()
+            || self.line_width <= 0.0
+            || self.nozzle_diameter <= 0.0
+        {
+            return Err(SliceError::InvalidPerimeterConfiguration);
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WallLoop {
+    pub wall_index: usize,
+    pub is_hole: bool,
+    pub polygon: Polygon,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PerimeterLayer {
+    pub z: f64,
+    pub walls: Vec<WallLoop>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SliceConfig {
     pub layer_height: f64,
@@ -171,6 +215,7 @@ pub enum SliceError {
     InvalidTriangle(usize),
     DegenerateTriangle(usize),
     InvalidConfiguration,
+    InvalidPerimeterConfiguration,
 }
 
 impl fmt::Display for SliceError {
@@ -185,6 +230,9 @@ impl fmt::Display for SliceError {
             }
             Self::DegenerateTriangle(index) => write!(formatter, "triangle {index} has zero area"),
             Self::InvalidConfiguration => write!(formatter, "invalid slicing configuration"),
+            Self::InvalidPerimeterConfiguration => {
+                write!(formatter, "invalid perimeter configuration")
+            }
         }
     }
 }
@@ -217,6 +265,147 @@ pub fn slice_mesh(mesh: &Mesh, config: SliceConfig) -> Result<Vec<Layer>, SliceE
             contours: slice_plane(mesh, z, config.scale),
         })
         .collect())
+}
+
+pub fn generate_perimeters(
+    layers: &[Layer],
+    config: PerimeterConfig,
+) -> Result<Vec<PerimeterLayer>, SliceError> {
+    let config = config.validate()?;
+    Ok(layers
+        .par_iter()
+        .map(|layer| PerimeterLayer {
+            z: layer.z,
+            walls: generate_layer_perimeters(layer, config),
+        })
+        .collect())
+}
+
+fn generate_layer_perimeters(layer: &Layer, config: PerimeterConfig) -> Vec<WallLoop> {
+    let outlines = layer
+        .contours
+        .iter()
+        .map(simplify_polygon)
+        .filter(|polygon| polygon.is_closed())
+        .collect::<Vec<_>>();
+    let holes = outlines
+        .iter()
+        .enumerate()
+        .map(|(index, polygon)| {
+            outlines
+                .iter()
+                .enumerate()
+                .filter(|(candidate_index, candidate)| {
+                    *candidate_index != index && point_in_polygon(polygon.points[0], candidate)
+                })
+                .count()
+                % 2
+                == 1
+        })
+        .collect::<Vec<_>>();
+
+    let mut walls = Vec::new();
+    for wall_index in 0..config.wall_count {
+        let distance = config.line_width * (wall_index as f64 + 0.5);
+        for (outline, &is_hole) in outlines.iter().zip(&holes) {
+            let delta = if is_hole { distance } else { -distance };
+            for polygon in offset_polygon(outline, delta) {
+                walls.push(WallLoop {
+                    wall_index,
+                    is_hole,
+                    polygon,
+                });
+            }
+        }
+    }
+    walls
+}
+
+fn simplify_polygon(polygon: &Polygon) -> Polygon {
+    let mut points = polygon.points.clone();
+    points.dedup();
+    if points.len() > 1 && points.first() == points.last() {
+        points.pop();
+    }
+    loop {
+        if points.len() < 3 {
+            break;
+        }
+        let mut removed = false;
+        for index in 0..points.len() {
+            let previous = points[(index + points.len() - 1) % points.len()];
+            let current = points[index];
+            let next = points[(index + 1) % points.len()];
+            let ab = (
+                i128::from(previous.x) - i128::from(current.x),
+                i128::from(previous.y) - i128::from(current.y),
+            );
+            let cb = (
+                i128::from(next.x) - i128::from(current.x),
+                i128::from(next.y) - i128::from(current.y),
+            );
+            if ab.0 * cb.1 - ab.1 * cb.0 == 0 && ab.0 * cb.0 + ab.1 * cb.1 <= 0 {
+                points.remove(index);
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    Polygon { points }
+}
+
+fn point_in_polygon(point: Point2, polygon: &Polygon) -> bool {
+    let mut inside = false;
+    for (a, b) in polygon
+        .points
+        .iter()
+        .zip(polygon.points.iter().cycle().skip(1))
+        .take(polygon.points.len())
+    {
+        let intersects = (a.y > point.y) != (b.y > point.y)
+            && (point.x as f64)
+                < (b.x as f64 - a.x as f64) * (point.y as f64 - a.y as f64)
+                    / (b.y as f64 - a.y as f64)
+                    + a.x as f64;
+        if intersects {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+fn offset_polygon(polygon: &Polygon, distance: f64) -> Vec<Polygon> {
+    let path: ClipperPath<One> = polygon
+        .points
+        .iter()
+        .map(|point| (point.x as f64, point.y as f64))
+        .collect::<Vec<_>>()
+        .into();
+    let offset = inflate(
+        path,
+        distance * DEFAULT_SCALE,
+        JoinType::Miter,
+        EndType::Polygon,
+        2.0,
+    );
+    let paths: Vec<Vec<(f64, f64)>> = offset.into();
+    paths
+        .into_iter()
+        .map(|points| Polygon {
+            points: points
+                .into_iter()
+                .map(|(x, y)| Point2 {
+                    x: x.round() as i64,
+                    y: y.round() as i64,
+                })
+                .collect(),
+        })
+        .map(|polygon| simplify_polygon(&polygon))
+        .filter(|polygon| polygon.is_closed())
+        .collect()
 }
 
 fn slice_plane(mesh: &Mesh, z: f64, scale: f64) -> Vec<Polygon> {
@@ -409,6 +598,77 @@ pub fn write_layer_svg(layer: &Layer, path: impl AsRef<Path>) -> Result<(), Slic
     std::fs::write(path, document.to_string()).map_err(SliceError::Io)
 }
 
+pub fn write_perimeter_layer_svg(
+    layer: &PerimeterLayer,
+    path: impl AsRef<Path>,
+) -> Result<(), SliceError> {
+    let coordinates = layer
+        .walls
+        .iter()
+        .flat_map(|wall| wall.polygon.points.iter())
+        .map(|point| {
+            (
+                point.x as f64 / DEFAULT_SCALE,
+                point.y as f64 / DEFAULT_SCALE,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (min_x, max_x, min_y, max_y) = coordinates.iter().fold(
+        (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ),
+        |(min_x, max_x, min_y, max_y), &(x, y)| {
+            (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+        },
+    );
+    let (min_x, max_x, min_y, max_y) = if coordinates.is_empty() {
+        (0.0, 1.0, 0.0, 1.0)
+    } else {
+        (min_x, max_x, min_y, max_y)
+    };
+    let margin = 1.0;
+    let view_min_x = min_x - margin;
+    let view_min_y = min_y - margin;
+    let view_width = (max_x - min_x + 2.0 * margin).max(1.0);
+    let view_height = (max_y - min_y + 2.0 * margin).max(1.0);
+    let colors = [
+        "#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#a65628",
+    ];
+    let mut group = svg::node::element::Group::new().set(
+        "transform",
+        format!("translate(0 {}) scale(1 -1)", min_y + max_y),
+    );
+    for wall in &layer.walls {
+        let mut data = String::new();
+        for (index, point) in wall.polygon.points.iter().enumerate() {
+            let x = point.x as f64 / DEFAULT_SCALE;
+            let y = point.y as f64 / DEFAULT_SCALE;
+            data.push_str(if index == 0 { "M " } else { "L " });
+            data.push_str(&format!("{x:.6},{y:.6} "));
+        }
+        data.push('Z');
+        let path_element = svg::node::element::Path::new()
+            .set("d", data)
+            .set("fill", "none")
+            .set("stroke", colors[wall.wall_index % colors.len()])
+            .set("stroke-width", "0.08")
+            .set("vector-effect", "non-scaling-stroke");
+        group = group.add(path_element);
+    }
+    let document = svg::Document::new()
+        .set("width", "600")
+        .set("height", "600")
+        .set(
+            "viewBox",
+            format!("{view_min_x} {view_min_y} {view_width} {view_height}"),
+        )
+        .add(group);
+    std::fs::write(path, document.to_string()).map_err(SliceError::Io)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +800,112 @@ mod tests {
         assert_eq!(layers.len(), 1);
         assert_eq!(layers[0].contours.len(), 1);
         assert_eq!(layers[0].contours[0].signed_area().abs(), 1_000_000);
+    }
+
+    fn square(min: i64, max: i64) -> Polygon {
+        Polygon {
+            points: vec![
+                Point2 { x: min, y: min },
+                Point2 { x: max, y: min },
+                Point2 { x: max, y: max },
+                Point2 { x: min, y: max },
+            ],
+        }
+    }
+
+    fn bounds(polygon: &Polygon) -> (i64, i64, i64, i64) {
+        polygon.points.iter().fold(
+            (i64::MAX, i64::MIN, i64::MAX, i64::MIN),
+            |(min_x, max_x, min_y, max_y), point| {
+                (
+                    min_x.min(point.x),
+                    max_x.max(point.x),
+                    min_y.min(point.y),
+                    max_y.max(point.y),
+                )
+            },
+        )
+    }
+
+    #[test]
+    fn generates_three_nested_cube_walls_with_half_width_start() {
+        let layers = vec![Layer {
+            z: 0.2,
+            contours: vec![square(0, 20_000)],
+        }];
+        let perimeters = generate_perimeters(
+            &layers,
+            PerimeterConfig {
+                wall_count: 3,
+                line_width: 0.4,
+                nozzle_diameter: 0.4,
+            },
+        )
+        .unwrap();
+        assert_eq!(perimeters[0].walls.len(), 3);
+        assert_eq!(
+            bounds(&perimeters[0].walls[0].polygon),
+            (200, 19_800, 200, 19_800)
+        );
+        assert_eq!(
+            bounds(&perimeters[0].walls[1].polygon),
+            (600, 19_400, 600, 19_400)
+        );
+        assert_eq!(
+            bounds(&perimeters[0].walls[2].polygon),
+            (1_000, 19_000, 1_000, 19_000)
+        );
+    }
+
+    #[test]
+    fn generates_walls_on_both_sides_of_a_ring() {
+        let layers = vec![Layer {
+            z: 0.2,
+            contours: vec![square(0, 20_000), square(5_000, 15_000)],
+        }];
+        let perimeters = generate_perimeters(
+            &layers,
+            PerimeterConfig {
+                wall_count: 2,
+                line_width: 0.4,
+                nozzle_diameter: 0.4,
+            },
+        )
+        .unwrap();
+        assert_eq!(perimeters[0].walls.len(), 4);
+        let outer_walls = perimeters[0]
+            .walls
+            .iter()
+            .filter(|wall| !wall.is_hole)
+            .collect::<Vec<_>>();
+        let hole_walls = perimeters[0]
+            .walls
+            .iter()
+            .filter(|wall| wall.is_hole)
+            .collect::<Vec<_>>();
+        assert_eq!(outer_walls.len(), 2);
+        assert_eq!(hole_walls.len(), 2);
+        assert_eq!(
+            bounds(&hole_walls[0].polygon),
+            (4_800, 15_200, 4_800, 15_200)
+        );
+        assert_eq!(
+            bounds(&hole_walls[1].polygon),
+            (4_400, 15_600, 4_400, 15_600)
+        );
+    }
+
+    #[test]
+    fn removes_collinear_outline_points() {
+        let polygon = Polygon {
+            points: vec![
+                Point2 { x: 0, y: 0 },
+                Point2 { x: 5, y: 0 },
+                Point2 { x: 10, y: 0 },
+                Point2 { x: 10, y: 10 },
+                Point2 { x: 0, y: 10 },
+            ],
+        };
+        assert_eq!(simplify_polygon(&polygon).points, square(0, 10).points);
     }
 }
