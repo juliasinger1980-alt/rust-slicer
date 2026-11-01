@@ -103,8 +103,8 @@ impl GCodeConfig {
 
 pub fn load_gcode_config(path: impl AsRef<Path>) -> Result<GCodeConfig, GCodeError> {
     let text = fs::read_to_string(path).map_err(GCodeError::Io)?;
-    let config: GCodeConfig =
-        toml::from_str(&text).map_err(|error| GCodeError::Config(error.to_string()))?;
+    let config = toml::from_str::<GCodeConfig>(&text)
+        .map_err(|error| GCodeError::Config(error.to_string()))?;
     config.validate()?;
     Ok(config)
 }
