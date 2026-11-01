@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{GCodeConfig, InfillConfig, PerimeterConfig, SliceConfig, SolidInfillConfig};
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SliceSettings {
     #[serde(default)]
@@ -17,6 +17,15 @@ pub struct SliceSettings {
     pub solid_infill: SolidInfillConfig,
     #[serde(default)]
     pub gcode: GCodeConfig,
+}
+
+impl PartialEq for SliceSettings {
+    fn eq(&self, other: &Self) -> bool {
+        match (toml::to_string(self), toml::to_string(other)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 impl SliceSettings {
