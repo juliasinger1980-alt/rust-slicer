@@ -63,7 +63,7 @@ impl Default for GCodeConfig {
             retraction_distance: 0.8,
             retraction_speed: 35.0,
             minimum_retraction_travel: 1.0,
-            seam_position: SeamPosition::Nearest,
+            seam_position: SeamPosition::Aligned,
             travel_optimization: true,
             avoid_crossing_perimeters: true,
             fan_speed: 128,
@@ -225,7 +225,7 @@ pub fn generate_gcode_with_report(
         );
         for path in &paths {
             if let (Some(wall_index), Some(&seam)) = (path.wall_index, path.points.first()) {
-                previous_seams.entry(wall_index).or_insert(seam);
+                previous_seams.insert(wall_index, seam);
             }
         }
         let walls = perimeter
@@ -868,6 +868,7 @@ mod tests {
         let actual = extrusion_for_length(10.0, 0.4, 0.2, 1.75);
         let expected = 10.0 * 0.4 * 0.2 / (std::f64::consts::PI * 1.75_f64.powi(2) / 4.0);
         assert!((actual - expected).abs() < 1e-12);
+        assert_eq!(GCodeConfig::default().seam_position, SeamPosition::Aligned);
     }
 
     #[test]
