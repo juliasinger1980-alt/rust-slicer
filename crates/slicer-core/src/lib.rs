@@ -295,9 +295,12 @@ fn build_loops(segments: HashSet<(Point2, Point2)>) -> Vec<Polygon> {
         adjacency.entry(*a).or_default().push(*b);
         adjacency.entry(*b).or_default().push(*a);
     }
+    for neighbors in adjacency.values_mut() {
+        neighbors.sort_unstable();
+    }
     let mut unused = segments;
     let mut polygons = Vec::new();
-    while let Some(&(start, next)) = unused.iter().next() {
+    while let Some(&(start, next)) = unused.iter().min() {
         unused.remove(&(start, next));
         let mut points = vec![start, next];
         let mut previous = start;
@@ -306,9 +309,16 @@ fn build_loops(segments: HashSet<(Point2, Point2)>) -> Vec<Polygon> {
             let Some(neighbors) = adjacency.get(&current) else {
                 break;
             };
-            let Some(&candidate) = neighbors.iter().find(|&&point| {
-                point != previous && unused.contains(&ordered_edge(current, point))
-            }) else {
+            let Some(&candidate) = neighbors
+                .iter()
+                .filter(|&&point| {
+                    point != previous && unused.contains(&ordered_edge(current, point))
+                })
+                .min_by(|&&left, &&right| {
+                    clockwise_turn(previous, current, left)
+                        .total_cmp(&clockwise_turn(previous, current, right))
+                })
+            else {
                 break;
             };
             unused.remove(&ordered_edge(current, candidate));
@@ -325,6 +335,15 @@ fn build_loops(segments: HashSet<(Point2, Point2)>) -> Vec<Polygon> {
         }
     }
     polygons
+}
+
+fn clockwise_turn(previous: Point2, current: Point2, candidate: Point2) -> f64 {
+    let incoming = (previous.x - current.x, previous.y - current.y);
+    let outgoing = (candidate.x - current.x, candidate.y - current.y);
+    let cross =
+        (incoming.0 as f64) * (outgoing.1 as f64) - (incoming.1 as f64) * (outgoing.0 as f64);
+    let dot = (incoming.0 as f64) * (outgoing.0 as f64) + (incoming.1 as f64) * (outgoing.1 as f64);
+    (-cross).atan2(dot).rem_euclid(std::f64::consts::TAU)
 }
 
 pub fn write_layer_svg(layer: &Layer, path: impl AsRef<Path>) -> Result<(), SliceError> {

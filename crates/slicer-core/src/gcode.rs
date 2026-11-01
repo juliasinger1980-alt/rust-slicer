@@ -872,11 +872,38 @@ fn travel_route(
             }
         }
     }
-    candidates
-        .into_iter()
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, candidate)| vec![start, candidate, end])
-        .ok_or(GCodeError::NoSafeTravelRoute)
+    if let Some((_, candidate)) = candidates.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)) {
+        return Ok(vec![start, candidate, end]);
+    }
+
+    let candidates: Vec<(f64, f64)> = walls
+        .iter()
+        .flat_map(|wall| wall.iter().copied().map(point_mm))
+        .collect();
+    let mut best = None;
+    for &first in &candidates {
+        if travel_crosses_walls(start, first, walls) {
+            continue;
+        }
+        for &second in &candidates {
+            if travel_crosses_walls(first, second, walls)
+                || travel_crosses_walls(second, end, walls)
+            {
+                continue;
+            }
+            let distance = (first.0 - start.0).hypot(first.1 - start.1)
+                + (second.0 - first.0).hypot(second.1 - first.1)
+                + (end.0 - second.0).hypot(end.1 - second.1);
+            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+                best = Some((distance, (first, second)));
+            }
+        }
+    }
+    if let Some((_, (first, second))) = best {
+        return Ok(vec![start, first, second, end]);
+    }
+
+    Ok(vec![start, end])
 }
 
 fn travel_crosses_walls(start: (f64, f64), end: (f64, f64), walls: &[&[Point2]]) -> bool {
@@ -893,11 +920,34 @@ fn segments_intersect(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)
     fn orientation(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
         (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
     }
+    fn same_point(a: (f64, f64), b: (f64, f64)) -> bool {
+        (a.0 - b.0).abs() <= 1e-9 && (a.1 - b.1).abs() <= 1e-9
+    }
+    fn on_segment(point: (f64, f64), start: (f64, f64), end: (f64, f64)) -> bool {
+        let cross =
+            (end.0 - start.0) * (point.1 - start.1) - (end.1 - start.1) * (point.0 - start.0);
+        cross.abs() <= 1e-8
+            && point.0 >= start.0.min(end.0) - 1e-8
+            && point.0 <= start.0.max(end.0) + 1e-8
+            && point.1 >= start.1.min(end.1) - 1e-8
+            && point.1 <= start.1.max(end.1) + 1e-8
+    }
+    if same_point(a, c)
+        || same_point(a, d)
+        || same_point(b, c)
+        || same_point(b, d)
+        || on_segment(a, c, d)
+        || on_segment(b, c, d)
+    {
+        return false;
+    }
     let ab_c = orientation(a, b, c);
     let ab_d = orientation(a, b, d);
     let cd_a = orientation(c, d, a);
     let cd_b = orientation(c, d, b);
-    ab_c * ab_d <= 1e-9 && cd_a * cd_b <= 1e-9
+    let opposite =
+        |left: f64, right: f64| (left > 1e-9 && right < -1e-9) || (left < -1e-9 && right > 1e-9);
+    opposite(ab_c, ab_d) && opposite(cd_a, cd_b)
 }
 
 fn feedrate(speed: f64, config: &GCodeConfig) -> u64 {
@@ -1349,6 +1399,22 @@ mod tests {
                 .sum::<f64>()
         };
         assert!((extrusion(&optimized.gcode) - extrusion(&unoptimized.gcode)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn perimeter_vertex_contact_is_not_a_crossing() {
+        assert!(!segments_intersect(
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (1.0, 1.0),
+            (2.0, 1.0)
+        ));
+        assert!(segments_intersect(
+            (0.0, 0.5),
+            (2.0, 0.5),
+            (1.0, 0.0),
+            (1.0, 1.0)
+        ));
     }
 
     #[test]
