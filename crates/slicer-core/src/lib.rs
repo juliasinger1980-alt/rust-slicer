@@ -7,10 +7,12 @@ use clipper2::{EndType, JoinType, One, Path as ClipperPath, inflate};
 use rayon::prelude::*;
 
 pub mod debug;
+pub mod gcode;
 pub mod infill;
 mod model;
 
 pub use debug::{write_infill_layer_svg, write_solid_infill_layer_svg};
+pub use gcode::{GCodeConfig, GCodeError, generate_gcode, load_gcode_config, write_gcode};
 pub use infill::{
     InfillConfig, InfillLayer, InfillLine, SolidInfillConfig, SolidInfillLayer, generate_infill,
     generate_solid_infills,

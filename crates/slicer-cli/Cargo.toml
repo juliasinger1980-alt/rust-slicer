@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 slicer-core = { path = "../slicer-core" }
+toml = "0.8"
