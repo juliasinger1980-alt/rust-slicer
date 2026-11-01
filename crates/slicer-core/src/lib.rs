@@ -10,6 +10,7 @@ pub mod debug;
 pub mod gcode;
 pub mod infill;
 mod model;
+pub mod settings;
 
 pub use debug::{write_infill_layer_svg, write_solid_infill_layer_svg};
 pub use gcode::{
@@ -24,6 +25,7 @@ pub use model::{
     Layer, Mesh, PerimeterConfig, PerimeterLayer, Point2, Polygon, SliceConfig, SliceError,
     Triangle, Vertex3, WallLoop,
 };
+pub use settings::{SettingsError, SliceSettings};
 
 pub const DEFAULT_SCALE: f64 = 1_000.0;
 

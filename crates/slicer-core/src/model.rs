@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     fs::File,
@@ -125,7 +126,7 @@ pub struct Layer {
     pub contours: Vec<Polygon>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PerimeterConfig {
     pub wall_count: usize,
     pub line_width: f64,
@@ -168,7 +169,7 @@ pub struct PerimeterLayer {
     pub walls: Vec<WallLoop>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SliceConfig {
     pub layer_height: f64,
     pub first_layer_height: f64,

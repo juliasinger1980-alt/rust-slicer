@@ -1,10 +1,10 @@
 use std::{fmt, fs, path::Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{DEFAULT_SCALE, InfillLayer, PerimeterLayer, Point2, SolidInfillLayer};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct GCodeConfig {
     pub nozzle_diameter: f64,
@@ -138,11 +138,13 @@ pub fn generate_gcode(
     Ok(generate_gcode_with_report(perimeters, solid, sparse, config)?.gcode)
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SeamPosition {
     Nearest,
     Aligned,
+    Rear,
+    Random,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -372,16 +374,32 @@ fn seam_points(
                 )
             })
             .or(current),
+        SeamPosition::Rear | SeamPosition::Random => None,
     };
-    let index = target.map_or(0, |target| {
-        points
+    let index = match config.seam_position {
+        SeamPosition::Rear => points
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                point_distance_sq(**a, target).total_cmp(&point_distance_sq(**b, target))
-            })
-            .map_or(0, |(index, _)| index)
-    });
+            .max_by(|(_, a), (_, b)| a.y.cmp(&b.y).then_with(|| a.x.cmp(&b.x)))
+            .map_or(0, |(index, _)| index),
+        SeamPosition::Random => {
+            let seed = points.iter().fold(0_u64, |seed, point| {
+                seed.wrapping_mul(1_664_525)
+                    .wrapping_add(point.x as u64)
+                    .wrapping_add(point.y as u64)
+            });
+            (seed as usize) % points.len()
+        }
+        SeamPosition::Nearest | SeamPosition::Aligned => target.map_or(0, |target| {
+            points
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    point_distance_sq(**a, target).total_cmp(&point_distance_sq(**b, target))
+                })
+                .map_or(0, |(index, _)| index)
+        }),
+    };
     points
         .iter()
         .copied()

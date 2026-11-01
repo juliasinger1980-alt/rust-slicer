@@ -4,10 +4,11 @@ use clipper2::{
     EndType, FillRule, JoinType, One, Path as ClipperPath, difference, inflate, intersect, union,
 };
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::{DEFAULT_SCALE, PerimeterLayer, Point2, Polygon, SliceError, WallLoop};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct InfillConfig {
     pub density: f64,
     pub line_width: f64,
@@ -61,7 +62,7 @@ pub struct InfillLayer {
     pub lines: Vec<InfillLine>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SolidInfillConfig {
     pub top_layers: usize,
     pub bottom_layers: usize,
