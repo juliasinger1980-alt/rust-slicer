@@ -2,7 +2,10 @@ use std::{fmt, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{GCodeConfig, InfillConfig, PerimeterConfig, SliceConfig, SolidInfillConfig};
+use crate::{
+    AdhesionConfig, CoolingConfig, GCodeConfig, InfillConfig, PerimeterConfig, SliceConfig,
+    SolidInfillConfig,
+};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -15,6 +18,10 @@ pub struct SliceSettings {
     pub infill: InfillConfig,
     #[serde(default)]
     pub solid_infill: SolidInfillConfig,
+    #[serde(default)]
+    pub adhesion: AdhesionConfig,
+    #[serde(default)]
+    pub cooling: CoolingConfig,
     #[serde(default)]
     pub gcode: GCodeConfig,
 }
@@ -65,6 +72,23 @@ mod tests {
     #[test]
     fn settings_round_trip_preserves_values() {
         let original = SliceSettings {
+            adhesion: crate::AdhesionConfig {
+                skirt_loops: 2,
+                skirt_distance: 4.0,
+                brim_enabled: true,
+                brim_width: 1.2,
+                brim_inner_holes: true,
+            },
+            cooling: crate::CoolingConfig {
+                enabled: true,
+                minimum_layer_time_s: 8.0,
+                fan_enabled: true,
+                fan_off_first_layers: 2,
+                fan_full_speed_layer: 5,
+                fan_min_speed: 20,
+                fan_max_speed: 200,
+                ..Default::default()
+            },
             gcode: crate::GCodeConfig {
                 seam_position: crate::SeamPosition::Aligned,
                 travel_speed: 123.0,

@@ -4,6 +4,42 @@ use svg::node::element::{Group, Line, Path as SvgPath, Rectangle, Text};
 
 use crate::{DEFAULT_SCALE, InfillLayer, PerimeterLayer, SliceError, SolidInfillLayer};
 
+pub fn write_adhesion_layer_svg(
+    adhesion: &crate::AdhesionGeometry,
+    path: impl AsRef<Path>,
+) -> Result<(), SliceError> {
+    let coordinates = adhesion
+        .skirts
+        .iter()
+        .chain(&adhesion.brims)
+        .flat_map(|polygon| polygon.points.iter())
+        .map(scaled_point)
+        .collect::<Vec<_>>();
+    let (min_x, max_x, min_y, max_y) = bounds(&coordinates);
+    let mut group = transformed_group(min_y + max_y);
+    for polygon in &adhesion.skirts {
+        group = group.add(
+            SvgPath::new()
+                .set("d", polygon_path(polygon))
+                .set("fill", "none")
+                .set("stroke", "#984ea3")
+                .set("stroke-width", "0.12")
+                .set("vector-effect", "non-scaling-stroke"),
+        );
+    }
+    for polygon in &adhesion.brims {
+        group = group.add(
+            SvgPath::new()
+                .set("d", polygon_path(polygon))
+                .set("fill", "none")
+                .set("stroke", "#ff7f00")
+                .set("stroke-width", "0.12")
+                .set("vector-effect", "non-scaling-stroke"),
+        );
+    }
+    write_document(group, min_x, max_x, min_y, max_y, path)
+}
+
 pub fn write_infill_layer_svg(
     layer: &PerimeterLayer,
     infill: &InfillLayer,
@@ -187,6 +223,8 @@ fn legend() -> Group {
         ("#377eb8", "Walls"),
         ("#d3d3d3", "Sparse infill"),
         ("#ffd92f", "Solid infill"),
+        ("#984ea3", "Skirt"),
+        ("#ff7f00", "Brim"),
     ];
     let mut group = Group::new().set("transform", "translate(12 20)");
     for (index, (color, label)) in entries.iter().enumerate() {

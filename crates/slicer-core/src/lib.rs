@@ -6,15 +6,21 @@ use std::{
 use clipper2::{EndType, JoinType, One, Path as ClipperPath, inflate};
 use rayon::prelude::*;
 
+pub mod adhesion;
+pub mod cooling;
 pub mod debug;
 pub mod gcode;
 pub mod infill;
 mod model;
+pub mod pipeline;
 pub mod settings;
 
-pub use debug::{write_infill_layer_svg, write_solid_infill_layer_svg};
+pub use adhesion::{AdhesionConfig, AdhesionGeometry, generate_adhesion};
+pub use cooling::CoolingConfig;
+pub use debug::{write_adhesion_layer_svg, write_infill_layer_svg, write_solid_infill_layer_svg};
 pub use gcode::{
     GCodeConfig, GCodeError, GCodeReport, SeamPosition, generate_gcode, generate_gcode_with_report,
+    generate_gcode_with_report_and_adhesion, generate_gcode_with_report_and_settings,
     load_gcode_config, write_gcode,
 };
 pub use infill::{
@@ -25,6 +31,7 @@ pub use model::{
     Layer, Mesh, PerimeterConfig, PerimeterLayer, Point2, Polygon, SliceConfig, SliceError,
     Triangle, Vertex3, WallLoop,
 };
+pub use pipeline::{SliceLayer, SliceProgress, SliceResult, shared_cancel_flag, slice};
 pub use settings::{SettingsError, SliceSettings};
 
 pub const DEFAULT_SCALE: f64 = 1_000.0;

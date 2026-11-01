@@ -213,6 +213,10 @@ pub enum SliceError {
     InvalidPerimeterConfiguration,
     InvalidInfillConfiguration,
     BooleanOperation(String),
+    InvalidAdhesionConfiguration,
+    InvalidCoolingConfiguration,
+    Cancelled,
+    GCode(String),
 }
 
 impl fmt::Display for SliceError {
@@ -234,6 +238,14 @@ impl fmt::Display for SliceError {
             Self::BooleanOperation(error) => {
                 write!(formatter, "polygon boolean operation failed: {error}")
             }
+            Self::InvalidAdhesionConfiguration => {
+                write!(formatter, "invalid skirt or brim configuration")
+            }
+            Self::InvalidCoolingConfiguration => {
+                write!(formatter, "invalid cooling configuration")
+            }
+            Self::Cancelled => write!(formatter, "slicing cancelled"),
+            Self::GCode(error) => write!(formatter, "G-code generation failed: {error}"),
         }
     }
 }
