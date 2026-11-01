@@ -10,8 +10,11 @@ pub mod debug;
 pub mod infill;
 mod model;
 
-pub use debug::write_infill_layer_svg;
-pub use infill::{InfillConfig, InfillLayer, InfillLine, generate_infill};
+pub use debug::{write_infill_layer_svg, write_solid_infill_layer_svg};
+pub use infill::{
+    InfillConfig, InfillLayer, InfillLine, SolidInfillConfig, SolidInfillLayer, generate_infill,
+    generate_solid_infills,
+};
 pub use model::{
     Layer, Mesh, PerimeterConfig, PerimeterLayer, Point2, Polygon, SliceConfig, SliceError,
     Triangle, Vertex3, WallLoop,

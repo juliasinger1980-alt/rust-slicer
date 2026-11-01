@@ -1,8 +1,9 @@
 use std::{env, fs, path::PathBuf};
 
 use slicer_core::{
-    InfillConfig, Mesh, PerimeterConfig, SliceConfig, generate_infill, generate_perimeters,
-    slice_mesh, write_infill_layer_svg, write_layer_svg, write_perimeter_layer_svg,
+    InfillConfig, Mesh, PerimeterConfig, SliceConfig, SolidInfillConfig, generate_infill,
+    generate_perimeters, generate_solid_infills, slice_mesh, write_infill_layer_svg,
+    write_layer_svg, write_perimeter_layer_svg, write_solid_infill_layer_svg,
 };
 
 fn main() {
@@ -31,6 +32,11 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn std::e
     let layers = slice_mesh(&mesh, config)?;
     let perimeters = generate_perimeters(&layers, PerimeterConfig::default())?;
     let infill = generate_infill(&perimeters, InfillConfig::default())?;
+    let solid_infill = generate_solid_infills(
+        &perimeters,
+        InfillConfig::default(),
+        SolidInfillConfig::default(),
+    )?;
 
     println!("layers: {}", layers.len());
     println!("layer height: {:.3} mm", config.layer_height);
@@ -43,6 +49,11 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn std::e
             perimeter,
             infill_layer,
             output.join(format!("infill_{index:04}.svg")),
+        )?;
+        write_solid_infill_layer_svg(
+            perimeter,
+            &solid_infill[index],
+            output.join(format!("solid_infill_{index:04}.svg")),
         )?;
     }
 

@@ -211,6 +211,7 @@ pub enum SliceError {
     InvalidConfiguration,
     InvalidPerimeterConfiguration,
     InvalidInfillConfiguration,
+    BooleanOperation(String),
 }
 
 impl fmt::Display for SliceError {
@@ -229,6 +230,9 @@ impl fmt::Display for SliceError {
                 write!(formatter, "invalid perimeter configuration")
             }
             Self::InvalidInfillConfiguration => write!(formatter, "invalid infill configuration"),
+            Self::BooleanOperation(error) => {
+                write!(formatter, "polygon boolean operation failed: {error}")
+            }
         }
     }
 }
